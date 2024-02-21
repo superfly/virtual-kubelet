@@ -141,22 +141,40 @@ func podsEqual(ctx context.Context, pod1, pod2 *corev1.Pod) bool {
 	span := oteltrace.SpanFromContext(ctx)
 	switch {
 	case !cmp.Equal(pod1.Spec.Containers, pod2.Spec.Containers):
-		span.SetAttributes(attribute.String("pod.diff", "containers"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "containers"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.Containers, pod2.Spec.Containers)),
+		)
 		return false
 	case !cmp.Equal(pod1.Spec.InitContainers, pod2.Spec.InitContainers):
-		span.SetAttributes(attribute.String("pod.diff", "initContainers"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "initContainers"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.InitContainers, pod2.Spec.InitContainers)),
+		)
 		return false
 	case !cmp.Equal(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds):
-		span.SetAttributes(attribute.String("pod.diff", "activeDeadlineSeconds"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "activeDeadlineSeconds"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds)),
+		)
 		return false
 	case !cmp.Equal(pod1.Spec.Tolerations, pod2.Spec.Tolerations):
-		span.SetAttributes(attribute.String("pod.diff", "tolerations"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "tolerations"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.Tolerations, pod2.Spec.Tolerations)),
+		)
 		return false
 	case !cmp.Equal(pod1.ObjectMeta.Labels, pod2.Labels):
-		span.SetAttributes(attribute.String("pod.diff", "labels"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "labels"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.ObjectMeta.Labels, pod2.Labels)),
+		)
 		return false
 	case !cmp.Equal(pod1.ObjectMeta.Annotations, pod2.Annotations):
-		span.SetAttributes(attribute.String("pod.diff", "annotations"))
+		span.SetAttributes(
+			attribute.String("pod.diff", "annotations"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.ObjectMeta.Annotations, pod2.Annotations)),
+		)
 		return false
 	default:
 		return true
