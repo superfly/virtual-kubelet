@@ -27,6 +27,8 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/internal/podutils"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,7 +88,7 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 	// NOTE: Some providers return a non-nil error in their GetPod implementation when the pod is not found while some other don't.
 	// Hence, we ignore the error and just act upon the pod if it is non-nil (meaning that the provider still knows about the pod).
 	if podFromProvider, _ := pc.provider.GetPod(ctx, pod.Namespace, pod.Name); podFromProvider != nil {
-		if !podsEqual(podFromProvider, podForProvider) {
+		if !podsEqual(ctx, podFromProvider, podForProvider) {
 			log.G(ctx).Debugf("Pod %s exists, updating pod in provider", podFromProvider.Name)
 			if origErr := pc.provider.UpdatePod(ctx, podForProvider); origErr != nil {
 				pc.handleProviderError(ctx, span, origErr, pod)
@@ -112,7 +114,7 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 
 // podsEqual checks if two pods are equal according to the fields we know that are allowed
 // to be modified after startup time.
-func podsEqual(pod1, pod2 *corev1.Pod) bool {
+func podsEqual(ctx context.Context, pod1, pod2 *corev1.Pod) bool {
 	// Pod Update Only Permits update of:
 	// - `spec.containers[*].image`
 	// - `spec.initContainers[*].image`
@@ -122,12 +124,47 @@ func podsEqual(pod1, pod2 *corev1.Pod) bool {
 	// - `objectmeta.annotations`
 	// compare the values of the pods to see if the values actually changed
 
-	return cmp.Equal(pod1.Spec.Containers, pod2.Spec.Containers) &&
-		cmp.Equal(pod1.Spec.InitContainers, pod2.Spec.InitContainers) &&
-		cmp.Equal(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds) &&
-		cmp.Equal(pod1.Spec.Tolerations, pod2.Spec.Tolerations) &&
-		cmp.Equal(pod1.ObjectMeta.Labels, pod2.Labels) &&
-		cmp.Equal(pod1.ObjectMeta.Annotations, pod2.Annotations)
+	span := oteltrace.SpanFromContext(ctx)
+	switch {
+	case !cmp.Equal(pod1.Spec.Containers, pod2.Spec.Containers):
+		span.SetAttributes(
+			attribute.String("pod.diff", "containers"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.Containers, pod2.Spec.Containers)),
+		)
+		return false
+	case !cmp.Equal(pod1.Spec.InitContainers, pod2.Spec.InitContainers):
+		span.SetAttributes(
+			attribute.String("pod.diff", "initContainers"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.InitContainers, pod2.Spec.InitContainers)),
+		)
+		return false
+	case !cmp.Equal(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds):
+		span.SetAttributes(
+			attribute.String("pod.diff", "activeDeadlineSeconds"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.ActiveDeadlineSeconds, pod2.Spec.ActiveDeadlineSeconds)),
+		)
+		return false
+	case !cmp.Equal(pod1.Spec.Tolerations, pod2.Spec.Tolerations):
+		span.SetAttributes(
+			attribute.String("pod.diff", "tolerations"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.Spec.Tolerations, pod2.Spec.Tolerations)),
+		)
+		return false
+	case !cmp.Equal(pod1.ObjectMeta.Labels, pod2.Labels):
+		span.SetAttributes(
+			attribute.String("pod.diff", "labels"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.ObjectMeta.Labels, pod2.Labels)),
+		)
+		return false
+	case !cmp.Equal(pod1.ObjectMeta.Annotations, pod2.Annotations):
+		span.SetAttributes(
+			attribute.String("pod.diff", "annotations"),
+			attribute.String("pod.diff_reason", cmp.Diff(pod1.ObjectMeta.Annotations, pod2.Annotations)),
+		)
+		return false
+	default:
+		return true
+	}
 
 }
 
@@ -142,8 +179,8 @@ func deleteGraceTimeEqual(old, new *int64) bool {
 }
 
 // podShouldEnqueue checks if two pods equal according to podsEqual func and DeleteTimeStamp
-func podShouldEnqueue(oldPod, newPod *corev1.Pod) bool {
-	if !podsEqual(oldPod, newPod) {
+func podShouldEnqueue(ctx context.Context, oldPod, newPod *corev1.Pod) bool {
+	if !podsEqual(ctx, oldPod, newPod) {
 		return true
 	}
 	if !deleteGraceTimeEqual(oldPod.DeletionGracePeriodSeconds, newPod.DeletionGracePeriodSeconds) {
