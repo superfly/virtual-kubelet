@@ -361,7 +361,7 @@ func (pc *PodController) Run(ctx context.Context, podSyncWorkers int) (retErr er
 				}
 				kPod.Unlock()
 
-				if podShouldEnqueue(oldPod, newPod) {
+				if podShouldEnqueue(ctx, oldPod, newPod) {
 					pc.syncPodsFromKubernetes.Enqueue(ctx, key)
 				}
 			}
