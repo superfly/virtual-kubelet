@@ -85,6 +85,9 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 		"namespace": pod.GetNamespace(),
 	})
 
+	// We need to keep the original pod so we can compare with what the provider returns for an update.
+	podForDiff := pod.DeepCopy()
+
 	if !pc.skipDownwardAPIResolution {
 		// We do this so we don't mutate the pod from the informer cache
 		pod = pod.DeepCopy()
@@ -102,7 +105,7 @@ func (pc *PodController) createOrUpdatePod(ctx context.Context, pod *corev1.Pod)
 	// NOTE: Some providers return a non-nil error in their GetPod implementation when the pod is not found while some other don't.
 	// Hence, we ignore the error and just act upon the pod if it is non-nil (meaning that the provider still knows about the pod).
 	if podFromProvider, _ := pc.provider.GetPodByUID(ctx, pod.Namespace, pod.Name, pod.UID); podFromProvider != nil {
-		if !podsEqual(ctx, podFromProvider, podForProvider) {
+		if !podsEqual(ctx, podFromProvider, podForDiff) {
 			log.G(ctx).Debugf("Pod %s exists, updating pod in provider", podFromProvider.Name)
 			if origErr := pc.provider.UpdatePod(ctx, podForProvider); origErr != nil {
 				pc.handleProviderError(ctx, span, origErr, pod)
