@@ -112,7 +112,7 @@ func TestPodsEqual(t *testing.T) {
 
 	p2 := p1.DeepCopy()
 
-	assert.Assert(t, podsEqual(p1, p2))
+	assert.Assert(t, podsEqual(context.TODO(), p1, p2))
 }
 
 func TestPodsDifferent(t *testing.T) {
@@ -123,7 +123,7 @@ func TestPodsDifferent(t *testing.T) {
 	p2 := p1.DeepCopy()
 	p2.Spec.Containers[0].Image = "nginx:1.15.12-perl"
 
-	assert.Assert(t, !podsEqual(p1, p2))
+	assert.Assert(t, !podsEqual(context.TODO(), p1, p2))
 }
 
 func TestPodsDifferentIgnoreValue(t *testing.T) {
@@ -134,7 +134,7 @@ func TestPodsDifferentIgnoreValue(t *testing.T) {
 	p2 := p1.DeepCopy()
 	p2.Status.Phase = corev1.PodFailed
 
-	assert.Assert(t, podsEqual(p1, p2))
+	assert.Assert(t, podsEqual(context.TODO(), p1, p2))
 }
 
 func TestPodShouldEnqueueDifferentDeleteTimeStamp(t *testing.T) {
@@ -145,7 +145,7 @@ func TestPodShouldEnqueueDifferentDeleteTimeStamp(t *testing.T) {
 	p2 := p1.DeepCopy()
 	now := v1.NewTime(time.Now())
 	p2.DeletionTimestamp = &now
-	assert.Assert(t, podShouldEnqueue(p1, p2))
+	assert.Assert(t, podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodShouldEnqueueDifferentLabel(t *testing.T) {
@@ -155,7 +155,7 @@ func TestPodShouldEnqueueDifferentLabel(t *testing.T) {
 
 	p2 := p1.DeepCopy()
 	p2.Labels = map[string]string{"test": "test"}
-	assert.Assert(t, podShouldEnqueue(p1, p2))
+	assert.Assert(t, podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodShouldEnqueueDifferentAnnotation(t *testing.T) {
@@ -165,7 +165,7 @@ func TestPodShouldEnqueueDifferentAnnotation(t *testing.T) {
 
 	p2 := p1.DeepCopy()
 	p2.Annotations = map[string]string{"test": "test"}
-	assert.Assert(t, podShouldEnqueue(p1, p2))
+	assert.Assert(t, podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodShouldNotEnqueueDifferentStatus(t *testing.T) {
@@ -175,7 +175,7 @@ func TestPodShouldNotEnqueueDifferentStatus(t *testing.T) {
 
 	p2 := p1.DeepCopy()
 	p2.Status.Phase = corev1.PodSucceeded
-	assert.Assert(t, !podShouldEnqueue(p1, p2))
+	assert.Assert(t, !podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodShouldEnqueueDifferentDeleteGraceTime(t *testing.T) {
@@ -193,7 +193,7 @@ func TestPodShouldEnqueueDifferentDeleteGraceTime(t *testing.T) {
 
 	p2.DeletionGracePeriodSeconds = &newGraceTime
 	p2.DeletionTimestamp = &newTime
-	assert.Assert(t, podShouldEnqueue(p1, p2))
+	assert.Assert(t, podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodShouldEnqueueGraceTimeChanged(t *testing.T) {
@@ -204,7 +204,7 @@ func TestPodShouldEnqueueGraceTimeChanged(t *testing.T) {
 	p2 := p1.DeepCopy()
 	graceTime := int64(30)
 	p2.DeletionGracePeriodSeconds = &graceTime
-	assert.Assert(t, podShouldEnqueue(p1, p2))
+	assert.Assert(t, podShouldEnqueue(context.TODO(), p1, p2))
 }
 
 func TestPodCreateNewPod(t *testing.T) {
