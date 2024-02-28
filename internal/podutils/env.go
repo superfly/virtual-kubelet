@@ -102,7 +102,13 @@ func populateContainerEnvironment(ctx context.Context, pod *corev1.Pod, containe
 	// Values in "env" (sourced from ".env") will override any values with the same key defined in "envFrom" (sourced from ".envFrom").
 	// This is in accordance with what the Kubelet itself does.
 	// https://github.com/kubernetes/kubernetes/blob/v1.13.1/pkg/kubelet/kubelet_pods.go#L557-L558
+	// NOTE: Fly.io patch to not empty the secrets.
 	container.EnvFrom = []corev1.EnvFromSource{}
+	for _, envFrom := range container.EnvFrom {
+		if envFrom.SecretRef != nil {
+			container.EnvFrom = append(container.EnvFrom, envFrom)
+		}
+	}
 
 	res := make([]corev1.EnvVar, 0, len(tmpEnv))
 
@@ -259,9 +265,11 @@ loop:
 			// At this point we have successfully fetched the target secret.
 			// Iterate over the keys defined in the secret and populate the environment accordingly.
 			// https://github.com/kubernetes/kubernetes/blob/v1.13.1/pkg/kubelet/kubelet_pods.go#L581-L595
+			// NOTE: Fly.io patch to not include the secret value in the Env map.
 			invalidKeys := make([]string, 0)
 		sKeys:
-			for key, val := range s.Data {
+			// for key, val := range s.Data {
+			for key := range s.Data {
 				// If a prefix has been defined, prepend it to the environment variable's name.
 				if len(envFrom.Prefix) > 0 {
 					key = envFrom.Prefix + key
@@ -273,7 +281,7 @@ loop:
 					continue sKeys
 				}
 				// Add the key and its value to the environment.
-				res[key] = string(val)
+				// res[key] = string(val)
 			}
 			// Report any invalid keys.
 			if len(invalidKeys) > 0 {
@@ -447,9 +455,9 @@ func getEnvironmentVariableValueWithValueFromSecretKeyRef(ctx context.Context, e
 	// We must now try to grab the requested key.
 	var (
 		keyExists bool
-		keyValue  []byte
+		// keyValue  []byte
 	)
-	if keyValue, keyExists = s.Data[vf.Key]; !keyExists {
+	if _, keyExists = s.Data[vf.Key]; !keyExists {
 		// The requested key does not exist.
 		// However, we should not fail if the key reference is optional.
 		if optional {
@@ -463,7 +471,9 @@ func getEnvironmentVariableValueWithValueFromSecretKeyRef(ctx context.Context, e
 		return nil, fmt.Errorf("secret %q doesn't contain the %q key required by pod %s", vf.Name, vf.Key, pod.Name)
 	}
 	// Populate the environment variable and continue on to the next reference.
-	return ptr.To(string(keyValue)), nil
+	// NOTE: Fly.io patch to not include the secret value in the Env map.
+	// return ptr.To(string(keyValue)), nil
+	return nil, nil
 }
 
 // Handle population from a field (downward API).
