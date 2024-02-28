@@ -17,6 +17,7 @@ package podutils
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -102,13 +103,17 @@ func populateContainerEnvironment(ctx context.Context, pod *corev1.Pod, containe
 	// Values in "env" (sourced from ".env") will override any values with the same key defined in "envFrom" (sourced from ".envFrom").
 	// This is in accordance with what the Kubelet itself does.
 	// https://github.com/kubernetes/kubernetes/blob/v1.13.1/pkg/kubelet/kubelet_pods.go#L557-L558
-	// NOTE: Fly.io patch to not empty the secrets.
-	container.EnvFrom = []corev1.EnvFromSource{}
+	// NOTE: Fly.io patch to not empty the secrets from EnvFrom.
+	scrubbedEnvFrom := make([]corev1.EnvFromSource, 0, len(container.EnvFrom))
 	for _, envFrom := range container.EnvFrom {
 		if envFrom.SecretRef != nil {
-			container.EnvFrom = append(container.EnvFrom, envFrom)
+			scrubbedEnvFrom = append(scrubbedEnvFrom, corev1.EnvFromSource{
+				Prefix:    envFrom.Prefix,
+				SecretRef: envFrom.SecretRef,
+			})
 		}
 	}
+	container.EnvFrom = slices.Clip(scrubbedEnvFrom)
 
 	res := make([]corev1.EnvVar, 0, len(tmpEnv))
 
@@ -117,6 +122,11 @@ func populateContainerEnvironment(ctx context.Context, pod *corev1.Pod, containe
 			Name:  key,
 			Value: val,
 		})
+	}
+	for _, env := range container.Env {
+		if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			res = append(res, env)
+		}
 	}
 	container.Env = res
 
