@@ -492,11 +492,14 @@ func getEnvironmentVariableValueWithValueFromFieldRef(ctx context.Context, env *
 	vf := env.ValueFrom.FieldRef
 
 	runtimeVal, err := podFieldSelectorRuntimeValue(vf, pod)
-	if err != nil {
+	switch {
+	case err != nil:
 		return nil, err
+	case runtimeVal == "":
+		return nil, nil
+	default:
+		return ptr.To(runtimeVal), nil
 	}
-
-	return ptr.To(runtimeVal), nil
 }
 
 // podFieldSelectorRuntimeValue returns the runtime value of the given
