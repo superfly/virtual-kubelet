@@ -124,7 +124,13 @@ func populateContainerEnvironment(ctx context.Context, pod *corev1.Pod, containe
 		})
 	}
 	for _, env := range container.Env {
-		if env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+		// NOTE: Fly.io patch to rebuild from Env ValueFrom.
+		switch {
+		case env.ValueFrom == nil:
+			continue
+		case env.ValueFrom.SecretKeyRef != nil:
+			res = append(res, env)
+		case env.ValueFrom.FieldRef != nil && env.ValueFrom.FieldRef.FieldPath == "status.podIP":
 			res = append(res, env)
 		}
 	}
@@ -495,6 +501,7 @@ func getEnvironmentVariableValueWithValueFromFieldRef(ctx context.Context, env *
 	switch {
 	case err != nil:
 		return nil, err
+	// NOTE: Fly.io patch to not error on status.podIP
 	case runtimeVal == "":
 		return nil, nil
 	default:
