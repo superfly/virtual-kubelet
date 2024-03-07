@@ -104,6 +104,9 @@ func ExtractFieldPathAsString(obj interface{}, fieldPath string) (string, error)
 		return accessor.GetNamespace(), nil
 	case "metadata.uid":
 		return string(accessor.GetUID()), nil
+	// NOTE: Fly.io patch to not error on status.podIP
+	case "status.podIP":
+		return "", nil
 	}
 
 	return "", fmt.Errorf("unsupported fieldPath: %v", fieldPath)
