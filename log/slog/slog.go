@@ -13,8 +13,15 @@ var _ log.Logger = (*adapter)(nil)
 
 const LevelFatal = slog.Level(12)
 
+// Create a custom logging level for the Fatal level as slog does not
+// have this level by default
 type adapter struct {
 	inner *slog.Logger
+}
+
+// FromSlog creates a new `log.Logger` from a slog logger
+func FromSlog(logger *slog.Logger) log.Logger {
+	return &adapter{inner: logger}
 }
 
 func (l *adapter) Debug(args ...interface{}) {
