@@ -357,8 +357,11 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 
 	ctx, acqSpan := trace.StartSpan(ctx, "acquireNextItemSemaphore")
 	if err := q.waitForNextItemSemaphore.Acquire(ctx, 1); err != nil {
+		acqSpan.SetStatus(err)
+		acqSpan.End()
 		return nil, err
 	}
+	acqSpan.SetStatus(nil)
 	acqSpan.End()
 	defer q.waitForNextItemSemaphore.Release(1)
 
@@ -370,6 +373,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			q.lock.Unlock()
 			select {
 			case <-ctx.Done():
+				span.SetStatus(nil)
 				return nil, ctx.Err()
 			case <-q.wakeupCh:
 			}
@@ -383,6 +387,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 				q.items.Remove(element)
 				delete(q.itemsInQueue, qi.key)
 				q.lock.Unlock()
+				span.SetStatus(nil)
 				return qi, nil
 			}
 
@@ -398,6 +403,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 				}
 				return nil
 			}(); err != nil {
+				span.SetStatus(err)
 				return nil, err
 			}
 		}
