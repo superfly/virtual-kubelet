@@ -352,9 +352,14 @@ func (q *Queue) worker(ctx context.Context, i int) {
 }
 
 func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
+	ctx, span := trace.StartSpan(ctx, "getNextItem")
+	defer span.End()
+
+	ctx, acqSpan := trace.StartSpan(ctx, "acquireNextItemSemaphore")
 	if err := q.waitForNextItemSemaphore.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
+	acqSpan.End()
 	defer q.waitForNextItemSemaphore.Release(1)
 
 	for {
