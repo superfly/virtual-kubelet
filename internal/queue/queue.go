@@ -417,6 +417,8 @@ func (q *Queue) handleQueueItem(ctx context.Context) bool {
 	ctx, span := trace.StartSpan(ctx, "handleQueueItem")
 	defer span.End()
 
+	ctx = span.WithField(ctx, "queue", q.name)
+
 	qi, err := q.getNextItem(ctx)
 	if err != nil {
 		span.SetStatus(err)
@@ -450,13 +452,19 @@ func (q *Queue) handleQueueItemObject(ctx context.Context, qi *queueItem) error 
 
 	ctx = span.WithFields(ctx, map[string]interface{}{
 		"requeues":        qi.requeues,
-		"originallyAdded": qi.originallyAdded.String(),
+		"originallyAdded": qi.originallyAdded.Format(time.RFC3339Nano),
 		"addedViaRedirty": qi.addedViaRedirty,
-		"plannedForWork":  qi.plannedToStartWorkAt.String(),
+		"plannedForWork":  qi.plannedToStartWorkAt.Format(time.RFC3339Nano),
+	})
+
+	ctx = span.WithFields(ctx, map[string]interface{}{
+		"queue":            q.name,
+		"delayMs":          qi.plannedToStartWorkAt.Sub(qi.originallyAdded).Milliseconds(),
+		"unplannedDelayMs": q.clock.Now().Sub(qi.plannedToStartWorkAt).Milliseconds(),
 	})
 
 	if qi.delayedViaRateLimit != nil {
-		ctx = span.WithField(ctx, "delayedViaRateLimit", qi.delayedViaRateLimit.String())
+		ctx = span.WithField(ctx, "delayedViaRateLimitMs", qi.delayedViaRateLimit.Milliseconds())
 	}
 
 	// Add the current key as an attribute to the current span.
