@@ -352,9 +352,17 @@ func (q *Queue) worker(ctx context.Context, i int) {
 }
 
 func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
+	ctx, span := trace.StartSpan(ctx, "getNextItem")
+	defer span.End()
+
+	ctx, acqSpan := trace.StartSpan(ctx, "acquireNextItemSemaphore")
 	if err := q.waitForNextItemSemaphore.Acquire(ctx, 1); err != nil {
+		acqSpan.SetStatus(err)
+		acqSpan.End()
 		return nil, err
 	}
+	acqSpan.SetStatus(nil)
+	acqSpan.End()
 	defer q.waitForNextItemSemaphore.Release(1)
 
 	for {
@@ -365,6 +373,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			q.lock.Unlock()
 			select {
 			case <-ctx.Done():
+				span.SetStatus(nil)
 				return nil, ctx.Err()
 			case <-q.wakeupCh:
 			}
@@ -378,6 +387,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 				q.items.Remove(element)
 				delete(q.itemsInQueue, qi.key)
 				q.lock.Unlock()
+				span.SetStatus(nil)
 				return qi, nil
 			}
 
@@ -393,6 +403,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 				}
 				return nil
 			}(); err != nil {
+				span.SetStatus(err)
 				return nil, err
 			}
 		}
@@ -405,6 +416,8 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 func (q *Queue) handleQueueItem(ctx context.Context) bool {
 	ctx, span := trace.StartSpan(ctx, "handleQueueItem")
 	defer span.End()
+
+	ctx = span.WithField(ctx, "queue", q.name)
 
 	qi, err := q.getNextItem(ctx)
 	if err != nil {
@@ -439,13 +452,19 @@ func (q *Queue) handleQueueItemObject(ctx context.Context, qi *queueItem) error 
 
 	ctx = span.WithFields(ctx, map[string]interface{}{
 		"requeues":        qi.requeues,
-		"originallyAdded": qi.originallyAdded.String(),
+		"originallyAdded": qi.originallyAdded.Format(time.RFC3339Nano),
 		"addedViaRedirty": qi.addedViaRedirty,
-		"plannedForWork":  qi.plannedToStartWorkAt.String(),
+		"plannedForWork":  qi.plannedToStartWorkAt.Format(time.RFC3339Nano),
+	})
+
+	ctx = span.WithFields(ctx, map[string]interface{}{
+		"queue":            q.name,
+		"delayMs":          qi.plannedToStartWorkAt.Sub(qi.originallyAdded).Milliseconds(),
+		"unplannedDelayMs": q.clock.Now().Sub(qi.plannedToStartWorkAt).Milliseconds(),
 	})
 
 	if qi.delayedViaRateLimit != nil {
-		ctx = span.WithField(ctx, "delayedViaRateLimit", qi.delayedViaRateLimit.String())
+		ctx = span.WithField(ctx, "delayedViaRateLimitMs", qi.delayedViaRateLimit.Milliseconds())
 	}
 
 	// Add the current key as an attribute to the current span.
