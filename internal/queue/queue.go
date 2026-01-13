@@ -24,7 +24,6 @@ import (
 	pkgerrors "github.com/pkg/errors"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
-	"golang.org/x/sync/semaphore"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
@@ -47,6 +46,7 @@ type Queue struct {
 	clock clock.Clock
 	// lock protects running, and the items list / map
 	lock    sync.Mutex
+	cond    *sync.Cond
 	running bool
 	name    string
 	handler ItemHandler
@@ -58,12 +58,6 @@ type Queue struct {
 	itemsInQueue map[string]*list.Element
 	// itemsBeingProcessed is a map of (string) key -> item once it has been moved
 	itemsBeingProcessed map[string]*queueItem
-	// Wait for next semaphore is an exclusive (1 item) lock that is taken every time items is checked to see if there
-	// is an item in queue for work
-	waitForNextItemSemaphore *semaphore.Weighted
-
-	// wakeup
-	wakeupCh chan struct{}
 
 	retryFunc ShouldRetryFunc
 }
@@ -94,18 +88,18 @@ func New(ratelimiter workqueue.TypedRateLimiter[any], name string, handler ItemH
 	if retryFunc == nil {
 		retryFunc = DefaultRetryFunc
 	}
-	return &Queue{
-		clock:                    clock.RealClock{},
-		name:                     name,
-		ratelimiter:              ratelimiter,
-		items:                    list.New(),
-		itemsBeingProcessed:      make(map[string]*queueItem),
-		itemsInQueue:             make(map[string]*list.Element),
-		handler:                  handler,
-		wakeupCh:                 make(chan struct{}, 1),
-		waitForNextItemSemaphore: semaphore.NewWeighted(1),
-		retryFunc:                retryFunc,
+	q := &Queue{
+		clock:               clock.RealClock{},
+		name:                name,
+		ratelimiter:         ratelimiter,
+		items:               list.New(),
+		itemsBeingProcessed: make(map[string]*queueItem),
+		itemsInQueue:        make(map[string]*list.Element),
+		handler:             handler,
+		retryFunc:           retryFunc,
 	}
+	q.cond = sync.NewCond(&q.lock)
+	return q
 }
 
 // Enqueue enqueues the key in a rate limited fashion
@@ -179,12 +173,7 @@ func (q *Queue) insert(ctx context.Context, key string, ratelimit bool, delay *t
 		ctx = span.WithField(ctx, "delay", delay.String())
 	}
 
-	defer func() {
-		select {
-		case q.wakeupCh <- struct{}{}:
-		default:
-		}
-	}()
+	defer q.cond.Signal()
 
 	// First see if the item is already being processed
 	if item, ok := q.itemsBeingProcessed[key]; ok {
@@ -340,6 +329,8 @@ func (q *Queue) Run(ctx context.Context, workers int) {
 	}
 	defer group.Wait()
 	<-ctx.Done()
+	// Wake all workers for cancellation
+	q.cond.Broadcast()
 }
 
 func (q *Queue) worker(ctx context.Context, i int) {
@@ -355,58 +346,54 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 	ctx, span := trace.StartSpan(ctx, "getNextItem")
 	defer span.End()
 
-	ctx, acqSpan := trace.StartSpan(ctx, "acquireNextItemSemaphore")
-	if err := q.waitForNextItemSemaphore.Acquire(ctx, 1); err != nil {
-		acqSpan.SetStatus(err)
-		acqSpan.End()
-		return nil, err
-	}
-	acqSpan.SetStatus(nil)
-	acqSpan.End()
-	defer q.waitForNextItemSemaphore.Release(1)
+	// On context cancellation, broadcast so
+	// all workers blocked on cond.Wait can exit.
+	go func() {
+		<-ctx.Done()
+		q.cond.Broadcast()
+	}()
+
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
 	for {
-		q.lock.Lock()
+		select {
+		case <-ctx.Done():
+			span.SetStatus(ctx.Err())
+			return nil, ctx.Err()
+		default:
+		}
+
 		element := q.items.Front()
 		if element == nil {
-			// Wait for the next item
-			q.lock.Unlock()
+			q.cond.Wait()
+			continue
+		}
+
+		qi := element.Value.(*queueItem)
+		timeUntilProcessing := time.Until(qi.plannedToStartWorkAt)
+
+		// Do we need to sleep? If not, let's party.
+		if timeUntilProcessing <= 0 {
+			q.itemsBeingProcessed[qi.key] = qi
+			q.items.Remove(element)
+			delete(q.itemsInQueue, qi.key)
+			span.SetStatus(nil)
+			return qi, nil
+		}
+
+		// Item is delayed. Wait for timer...
+		timer := q.clock.NewTimer(timeUntilProcessing)
+		go func() {
 			select {
 			case <-ctx.Done():
-				span.SetStatus(nil)
-				return nil, ctx.Err()
-			case <-q.wakeupCh:
+			case <-timer.C():
 			}
-		} else {
-			qi := element.Value.(*queueItem)
-			timeUntilProcessing := time.Until(qi.plannedToStartWorkAt)
+			q.cond.Signal()
+		}()
 
-			// Do we need to sleep? If not, let's party.
-			if timeUntilProcessing <= 0 {
-				q.itemsBeingProcessed[qi.key] = qi
-				q.items.Remove(element)
-				delete(q.itemsInQueue, qi.key)
-				q.lock.Unlock()
-				span.SetStatus(nil)
-				return qi, nil
-			}
-
-			q.lock.Unlock()
-			if err := func() error {
-				timer := q.clock.NewTimer(timeUntilProcessing)
-				defer timer.Stop()
-				select {
-				case <-timer.C():
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-q.wakeupCh:
-				}
-				return nil
-			}(); err != nil {
-				span.SetStatus(err)
-				return nil, err
-			}
-		}
+		q.cond.Wait()
+		timer.Stop()
 	}
 }
 
