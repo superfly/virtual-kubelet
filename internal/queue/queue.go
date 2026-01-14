@@ -346,11 +346,16 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 	ctx, span := trace.StartSpan(ctx, "getNextItem")
 	defer span.End()
 
-	// On context cancellation, broadcast so
-	// all workers blocked on cond.Wait can exit.
+	// Goroutine broadcasts on context cancellation so workers blocked
+	// on cond.Wait() can exit. Exits when ctx is done OR done is closed.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		<-ctx.Done()
-		q.cond.Broadcast()
+		select {
+		case <-ctx.Done():
+			q.cond.Broadcast()
+		case <-done:
+		}
 	}()
 
 	q.lock.Lock()
@@ -366,7 +371,9 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 
 		element := q.items.Front()
 		if element == nil {
+			_, waitSpan := trace.StartSpan(ctx, "waitForItem")
 			q.cond.Wait()
+			waitSpan.End()
 			continue
 		}
 
@@ -382,18 +389,24 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			return qi, nil
 		}
 
-		// Item is delayed. Wait for timer...
+		// Item is delayed. Wait for timer or wakeup.
 		timer := q.clock.NewTimer(timeUntilProcessing)
+		timerDone := make(chan struct{})
 		go func() {
 			select {
 			case <-ctx.Done():
 			case <-timer.C():
+			case <-timerDone:
+				return
 			}
 			q.cond.Signal()
 		}()
 
+		_, waitSpan := trace.StartSpan(ctx, "waitForReady")
 		q.cond.Wait()
+		waitSpan.End()
 		timer.Stop()
+		close(timerDone)
 	}
 }
 
