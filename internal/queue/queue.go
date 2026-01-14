@@ -59,6 +59,11 @@ type Queue struct {
 	// itemsBeingProcessed is a map of (string) key -> item once it has been moved
 	itemsBeingProcessed map[string]*queueItem
 
+	// timerLeaderActive is true when a worker is waiting on a timer for a delayed item.
+	// Only one worker should wait on the timer; others wait on cond for a signal.
+	// This avoids a thundering herd on timers.
+	timerLeaderActive bool
+
 	retryFunc ShouldRetryFunc
 }
 
@@ -389,7 +394,17 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			return qi, nil
 		}
 
-		// Item is delayed. Wait for timer or wakeup.
+		// Item is delayed. Only one worker waits on the timer.
+		// Other workers just wait for a signal.
+		if q.timerLeaderActive {
+			_, waitSpan := trace.StartSpan(ctx, "waitForReady")
+			q.cond.Wait()
+			waitSpan.End()
+			continue
+		}
+
+		// Now I'm the leader
+		q.timerLeaderActive = true
 		timer := q.clock.NewTimer(timeUntilProcessing)
 		timerDone := make(chan struct{})
 		go func() {
@@ -399,14 +414,16 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			case <-timerDone:
 				return
 			}
-			q.cond.Signal()
+
+			q.cond.Broadcast()
 		}()
 
-		_, waitSpan := trace.StartSpan(ctx, "waitForReady")
+		_, waitSpan := trace.StartSpan(ctx, "waitForReadyAsLeader")
 		q.cond.Wait()
 		waitSpan.End()
 		timer.Stop()
 		close(timerDone)
+		q.timerLeaderActive = false
 	}
 }
 
