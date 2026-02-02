@@ -24,7 +24,6 @@ import (
 	pkgerrors "github.com/pkg/errors"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
-	"golang.org/x/sync/semaphore"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
@@ -47,6 +46,7 @@ type Queue struct {
 	clock clock.Clock
 	// lock protects running, and the items list / map
 	lock    sync.Mutex
+	cond    *sync.Cond
 	running bool
 	name    string
 	handler ItemHandler
@@ -58,12 +58,11 @@ type Queue struct {
 	itemsInQueue map[string]*list.Element
 	// itemsBeingProcessed is a map of (string) key -> item once it has been moved
 	itemsBeingProcessed map[string]*queueItem
-	// Wait for next semaphore is an exclusive (1 item) lock that is taken every time items is checked to see if there
-	// is an item in queue for work
-	waitForNextItemSemaphore *semaphore.Weighted
 
-	// wakeup
-	wakeupCh chan struct{}
+	// timerLeaderActive is true when a worker is waiting on a timer for a delayed item.
+	// Only one worker should wait on the timer; others wait on cond for a signal.
+	// This avoids a thundering herd on timers.
+	timerLeaderActive bool
 
 	retryFunc ShouldRetryFunc
 }
@@ -94,18 +93,18 @@ func New(ratelimiter workqueue.TypedRateLimiter[any], name string, handler ItemH
 	if retryFunc == nil {
 		retryFunc = DefaultRetryFunc
 	}
-	return &Queue{
-		clock:                    clock.RealClock{},
-		name:                     name,
-		ratelimiter:              ratelimiter,
-		items:                    list.New(),
-		itemsBeingProcessed:      make(map[string]*queueItem),
-		itemsInQueue:             make(map[string]*list.Element),
-		handler:                  handler,
-		wakeupCh:                 make(chan struct{}, 1),
-		waitForNextItemSemaphore: semaphore.NewWeighted(1),
-		retryFunc:                retryFunc,
+	q := &Queue{
+		clock:               clock.RealClock{},
+		name:                name,
+		ratelimiter:         ratelimiter,
+		items:               list.New(),
+		itemsBeingProcessed: make(map[string]*queueItem),
+		itemsInQueue:        make(map[string]*list.Element),
+		handler:             handler,
+		retryFunc:           retryFunc,
 	}
+	q.cond = sync.NewCond(&q.lock)
+	return q
 }
 
 // Enqueue enqueues the key in a rate limited fashion
@@ -179,12 +178,7 @@ func (q *Queue) insert(ctx context.Context, key string, ratelimit bool, delay *t
 		ctx = span.WithField(ctx, "delay", delay.String())
 	}
 
-	defer func() {
-		select {
-		case q.wakeupCh <- struct{}{}:
-		default:
-		}
-	}()
+	defer q.cond.Signal()
 
 	// First see if the item is already being processed
 	if item, ok := q.itemsBeingProcessed[key]; ok {
@@ -340,6 +334,8 @@ func (q *Queue) Run(ctx context.Context, workers int) {
 	}
 	defer group.Wait()
 	<-ctx.Done()
+	// Wake all workers for cancellation
+	q.cond.Broadcast()
 }
 
 func (q *Queue) worker(ctx context.Context, i int) {
@@ -355,58 +351,79 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 	ctx, span := trace.StartSpan(ctx, "getNextItem")
 	defer span.End()
 
-	ctx, acqSpan := trace.StartSpan(ctx, "acquireNextItemSemaphore")
-	if err := q.waitForNextItemSemaphore.Acquire(ctx, 1); err != nil {
-		acqSpan.SetStatus(err)
-		acqSpan.End()
-		return nil, err
-	}
-	acqSpan.SetStatus(nil)
-	acqSpan.End()
-	defer q.waitForNextItemSemaphore.Release(1)
+	// Goroutine broadcasts on context cancellation so workers blocked
+	// on cond.Wait() can exit. Exits when ctx is done OR done is closed.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			q.cond.Broadcast()
+		case <-done:
+		}
+	}()
+
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
 	for {
-		q.lock.Lock()
+		select {
+		case <-ctx.Done():
+			span.SetStatus(ctx.Err())
+			return nil, ctx.Err()
+		default:
+		}
+
 		element := q.items.Front()
 		if element == nil {
-			// Wait for the next item
-			q.lock.Unlock()
+			_, waitSpan := trace.StartSpan(ctx, "waitForItem")
+			q.cond.Wait()
+			waitSpan.End()
+			continue
+		}
+
+		qi := element.Value.(*queueItem)
+		timeUntilProcessing := time.Until(qi.plannedToStartWorkAt)
+
+		// Do we need to sleep? If not, let's party.
+		if timeUntilProcessing <= 0 {
+			q.itemsBeingProcessed[qi.key] = qi
+			q.items.Remove(element)
+			delete(q.itemsInQueue, qi.key)
+			span.SetStatus(nil)
+			return qi, nil
+		}
+
+		// Item is delayed. Only one worker waits on the timer.
+		// Other workers just wait for a signal.
+		if q.timerLeaderActive {
+			_, waitSpan := trace.StartSpan(ctx, "waitForReady")
+			q.cond.Wait()
+			waitSpan.End()
+			continue
+		}
+
+		// Now I'm the leader
+		q.timerLeaderActive = true
+		timer := q.clock.NewTimer(timeUntilProcessing)
+		timerDone := make(chan struct{})
+		go func() {
 			select {
 			case <-ctx.Done():
-				span.SetStatus(nil)
-				return nil, ctx.Err()
-			case <-q.wakeupCh:
-			}
-		} else {
-			qi := element.Value.(*queueItem)
-			timeUntilProcessing := time.Until(qi.plannedToStartWorkAt)
-
-			// Do we need to sleep? If not, let's party.
-			if timeUntilProcessing <= 0 {
-				q.itemsBeingProcessed[qi.key] = qi
-				q.items.Remove(element)
-				delete(q.itemsInQueue, qi.key)
-				q.lock.Unlock()
-				span.SetStatus(nil)
-				return qi, nil
+			case <-timer.C():
+			case <-timerDone:
+				return
 			}
 
-			q.lock.Unlock()
-			if err := func() error {
-				timer := q.clock.NewTimer(timeUntilProcessing)
-				defer timer.Stop()
-				select {
-				case <-timer.C():
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-q.wakeupCh:
-				}
-				return nil
-			}(); err != nil {
-				span.SetStatus(err)
-				return nil, err
-			}
-		}
+			q.cond.Broadcast()
+		}()
+
+		_, waitSpan := trace.StartSpan(ctx, "waitForReadyAsLeader")
+		q.cond.Wait()
+		waitSpan.End()
+		timer.Stop()
+		close(timerDone)
+		q.timerLeaderActive = false
 	}
 }
 
