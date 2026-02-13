@@ -358,6 +358,7 @@ func (pc *PodController) Run(ctx context.Context, podSyncWorkers int) (retErr er
 				kPod := obj.(*knownPod)
 				kPod.Lock()
 				if kPod.lastPodStatusUpdateSkipped &&
+					kPod.lastPodStatusReceivedFromProvider != nil &&
 					(!cmp.Equal(newPod.Status, kPod.lastPodStatusReceivedFromProvider.Status) ||
 						!cmp.Equal(newPod.Annotations, kPod.lastPodStatusReceivedFromProvider.Annotations) ||
 						!cmp.Equal(newPod.Labels, kPod.lastPodStatusReceivedFromProvider.Labels) ||
