@@ -259,6 +259,12 @@ func (pc *PodController) updatePodStatus(ctx context.Context, podFromKubernetes 
 	kPod.Lock()
 	podFromProvider := kPod.lastPodStatusReceivedFromProvider.DeepCopy()
 	kPod.Unlock()
+
+	if podFromProvider == nil {
+		log.G(ctx).Debug("No pod status received from provider yet, skipping update")
+		return nil
+	}
+
 	// Pod deleted by provider due some reasons. e.g. a K8s provider, pod created by deployment would be evicted when node is not ready.
 	// If we do not delete pod in K8s, deployment would not create a new one.
 	if podFromProvider.DeletionTimestamp != nil && podFromKubernetes.DeletionTimestamp == nil {
