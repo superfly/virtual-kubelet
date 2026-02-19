@@ -376,9 +376,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 
 		element := q.items.Front()
 		if element == nil {
-			_, waitSpan := trace.StartSpan(ctx, "waitForItem")
 			q.cond.Wait()
-			waitSpan.End()
 			continue
 		}
 
@@ -397,9 +395,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 		// Item is delayed. Only one worker waits on the timer.
 		// Other workers just wait for a signal.
 		if q.timerLeaderActive {
-			_, waitSpan := trace.StartSpan(ctx, "waitForReady")
 			q.cond.Wait()
-			waitSpan.End()
 			continue
 		}
 
@@ -418,9 +414,7 @@ func (q *Queue) getNextItem(ctx context.Context) (*queueItem, error) {
 			q.cond.Broadcast()
 		}()
 
-		_, waitSpan := trace.StartSpan(ctx, "waitForReadyAsLeader")
 		q.cond.Wait()
-		waitSpan.End()
 		timer.Stop()
 		close(timerDone)
 		q.timerLeaderActive = false
